@@ -1,10 +1,5 @@
 # retrieval/retrieval_pipeline.py
 
-from retrieval.query_analyzer import analyze_query
-from retrieval.adaptive_retriever import adaptive_retrieve
-from retrieval.reranker import rerank
-from retrieval.self_improving_pipeline import run_self_improving_retrieval
-
 try:
     from retrieval.self_improving_pipeline import run_self_improving_retrieval
 except ImportError:
