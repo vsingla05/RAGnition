@@ -21,9 +21,10 @@
 # 2. Subsequent times: Set RUN_INGESTION = False, run script  
 # 3. Adding new PDF: Set RUN_INGESTION = True again
 
-from pipeline.ingest_pipeline import run_ingestion
+from pipeline.multimodal_ingestion import run_ingestion
 from vectordb.chroma_client import init_chroma
 from retrieval.multimodal_pipeline import run_multimodal_rag
+from config import PDF_PATH
 
 RUN_INGESTION = True  # SET TO TRUE FOR FIRST RUN - now fresh start!
 
@@ -37,7 +38,7 @@ def main():
     if RUN_INGESTION:
         print("\nWARNING: RUN_INGESTION = True")
         print("Starting document ingestion...")
-        run_ingestion()
+        run_ingestion(PDF_PATH)
         print("\nNext time, set RUN_INGESTION = False\n")
     else:
         print("\nRUN_INGESTION = False (using cached documents)\n")

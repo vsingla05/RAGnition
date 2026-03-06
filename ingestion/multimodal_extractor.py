@@ -81,28 +81,45 @@ class MultimodalExtractor:
         return results
     
     def _extract_images_from_page(self, page, page_num: int) -> List[Dict]:
-        """Extract images from a page"""
+        """
+        Extract images from a page.
+        
+        Strategy:
+        1. Extract embedded raster images but skip tiny ones (logos/icons).
+        2. If significant vector drawings are detected or no large images exist, render the full page to capture diagrams/charts.
+        """
         images = []
         
         try:
             image_list = page.get_images()
+            valid_images_found = 0
             
+            # Strategy 1: Extract embedded images
             for img_index, img in enumerate(image_list):
                 try:
                     xref = img[0]
+                    # Get image info to check dimensions
+                    img_info = self.doc.extract_image(xref)
+                    if img_info:
+                        w, h = img_info.get("width", 0), img_info.get("height", 0)
+                        # Skip small images (logos, icons, lines)
+                        if w < 100 or h < 100:
+                            continue
+
                     pix = fitz.Pixmap(self.doc, xref)
-                    
-                    # Save image
                     img_filename = f"page_{page_num}_img_{img_index}.png"
                     img_path = self.images_dir / img_filename
                     
-                    if pix.n - pix.alpha < 4:  # GRAY or RGB
+                    if pix.n - pix.alpha < 4:
                         pix.save(str(img_path))
-                    else:  # RGBA
-                        pix = fitz.Pixmap(fitz.csRGB, pix)
-                        pix.save(str(img_path))
+                    else:
+                        pix_rgb = fitz.Pixmap(fitz.csRGB, pix)
+                        pix_rgb.save(str(img_path))
+                        pix_rgb = None
+                    pix = None
                     
                     self.image_count += 1
+                    valid_images_found += 1
                     
                     images.append({
                         "path": str(img_path),
@@ -110,17 +127,43 @@ class MultimodalExtractor:
                         "page": page_num,
                         "index": img_index,
                         "modality": "image",
-                        "type": "figure"
+                        "type": "embedded_image"
                     })
-                    
-                    print(f"   Saved: {img_filename}")
-                    
+                    print(f"   Saved embedded image: {img_filename}")
                 except Exception as e:
-                    print(f"   ⚠️  Error extracting image {img_index} from page {page_num}: {e}")
+                    print(f"   ⚠️  Error extracting image {img_index}: {e}")
+
+            # Strategy 2: Check for vector graphics/drawings
+            drawings = page.get_drawings()
+            
+            # If no valid large images were found, OR there are significant drawings (often charts/diagrams)
+            if valid_images_found == 0 or len(drawings) > 10:
+                text_len = len(page.get_text("text").strip())
+                # Don't render pages that are basically just long text with a tiny drawing (like a line)
+                # But if there are lots of drawings (e.g., > 20) or very little text, render it.
+                if len(drawings) > 20 or (valid_images_found == 0 and text_len < 1200 and len(drawings) > 0):
+                    pix = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+                    img_filename = f"page_{page_num}_rendered.png"
+                    img_path = self.images_dir / img_filename
                     
+                    pix.save(str(img_path))
+                    pix = None
+                    self.image_count += 1
+                    
+                    images.append({
+                        "path": str(img_path),
+                        "filename": img_filename,
+                        "page": page_num,
+                        "index": 999,
+                        "modality": "image",
+                        "type": "page_render",
+                        "description": f"Page {page_num} rendered to capture vector shapes/diagrams"
+                    })
+                    print(f"   Saved page render: {img_filename} (captured vector/visual content)")
+
         except Exception as e:
             print(f"   ⚠️  Error processing images on page {page_num}: {e}")
-        
+            
         return images
     
     def _extract_tables_from_page(self, page, page_num: int) -> List[Dict]:

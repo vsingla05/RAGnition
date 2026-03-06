@@ -76,6 +76,8 @@ class MultimodalGenerator:
 
             # Add image results with descriptions
             image_items = retrieved.get("image_results", [])
+            image_parts = []
+            
             if image_items:
                 context_parts.append("\n\n🖼️  IMAGE SOURCES:")
                 for i, item in enumerate(image_items, 1):
@@ -87,6 +89,33 @@ class MultimodalGenerator:
                     if item.get("key_elements"):
                         context_parts.append(f"Key Elements: {item.get('key_elements')}")
                     images_to_reference.append(item)
+                    
+                    # Prepare actual image for Gemini model
+                    img_path = item.get("path")
+                    if img_path and os.path.exists(img_path):
+                        try:
+                            import base64
+                            from pathlib import Path
+                            with open(img_path, "rb") as f:
+                                img_bytes = f.read()
+                            
+                            ext = Path(img_path).suffix.lower()
+                            mime_types = {
+                                ".png": "image/png",
+                                ".jpg": "image/jpeg",
+                                ".jpeg": "image/jpeg",
+                                ".gif": "image/gif",
+                                ".webp": "image/webp"
+                            }
+                            mime_type = mime_types.get(ext, "image/png")
+                            
+                            image_parts.append({
+                                "mime_type": mime_type,
+                                "data": base64.standard_b64encode(img_bytes).decode("utf-8")
+                            })
+                            context_parts.append(f"[Note: Image {i} pixel data is provided to you natively]")
+                        except Exception as e:
+                            print(f"   ⚠️  Could not load image {img_path} for generation: {e}")
 
             context = "\n".join(context_parts)
 
@@ -108,31 +137,36 @@ You have access to:
 - Text passages from the document
 - Images with captions and descriptions (figures, diagrams, charts)
 - Tables with summaries and content
+- Actual image data provided inline
 
 RULES:
-1. Answer ONLY based on the provided document context — do NOT use outside knowledge
+1. Answer ONLY based on the provided document context and images — do NOT use outside knowledge
 2. When referencing images, explicitly mention them: "As shown in Figure X on page Y..."
 3. When referencing tables, mention them: "According to the table on page Z..."
 4. Cite page numbers for all claims
-5. If the answer is not in the context, clearly state: "This information is not available in the uploaded document"
+5. If the answer is not in the context or visible in the provided images, clearly state: "This information is not available in the uploaded document"
 6. Be precise with technical specifications, measurements, and engineering values
-7. If images contain diagrams or schematics, explain what they show"""
+7. Look closely at the provided inline images to answer questions about charts, diagrams, or schematics"""
 
             user_prompt = f"""Question: {query}
 
 Retrieved Document Content:
 {context}
 
-Please provide a comprehensive, technically accurate answer based ONLY on the above document content.
+Please provide a comprehensive, technically accurate answer based ONLY on the above document content AND the provided images.
 Include relevant page citations and reference any figures or tables mentioned."""
 
             print(f"📬 Sending to Gemini 2.5 Flash...")
             print(f"   📝 Text sources: {len(text_items)}")
             print(f"   📊 Table sources: {len(table_items)}")
-            print(f"   🖼️  Image sources: {len(image_items)}")
+            print(f"   🖼️  Image sources: {len(image_items)} (providing {len(image_parts)} raw images)")
+
+            # Combine prompts and actual image bytes
+            contents = [system_prompt, user_prompt]
+            contents.extend(image_parts)
 
             response = self.model.generate_content(
-                [system_prompt, user_prompt],
+                contents,
                 generation_config=self.genai.types.GenerationConfig(
                     temperature=0.3,  # Lower temperature for more factual answers
                     top_p=0.9,

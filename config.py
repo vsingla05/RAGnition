@@ -1,6 +1,6 @@
 # config.py
 
-PDF_PATH = "sample_paper.pdf"
+PDF_PATH = "uploads/Let's Explore Rockets.pdf"
 
 CHROMA_DIR = "./chroma_store"
 COLLECTION_NAME = "rag_multimodal_collection"

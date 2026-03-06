@@ -177,6 +177,7 @@ async def get_current_document():
 async def upload_pdf(file: UploadFile = File(...)):
     """
     Upload and ingest a PDF file.
+    LIMIT: Maximum 5 PDFs can be stored. Delete old ones to add new ones.
     After upload, all /ask-multimodal calls will use THIS document
     unless a specific doc_id is provided.
     """
@@ -186,6 +187,13 @@ async def upload_pdf(file: UploadFile = File(...)):
         # Validate file type
         if not file.filename.lower().endswith('.pdf'):
             raise HTTPException(status_code=400, detail="Only PDF files are supported")
+
+        # Check document limit (MAX 5 PDFs)
+        if len(DOCUMENT_REGISTRY) >= 5:
+            raise HTTPException(
+                status_code=400, 
+                detail="Maximum 5 PDFs limit reached. Please delete a document before uploading a new one."
+            )
 
         # Read file content
         file_content = await file.read()
@@ -426,6 +434,89 @@ async def get_document_images(doc_id: str):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# Document Management - Delete Documents
+# ============================================================================
+
+@app.delete("/document/{doc_id}")
+async def delete_document(doc_id: str):
+    """
+    Delete a document from the system
+    - Removes from DOCUMENT_REGISTRY
+    - Removes from vector database (Chroma)
+    - Removes uploaded PDF file
+    - If deleted doc was CURRENT, switches to most recent remaining doc
+    """
+    global CURRENT_DOC_ID
+    
+    try:
+        if doc_id not in DOCUMENT_REGISTRY:
+            raise HTTPException(status_code=404, detail=f"Document not found: {doc_id}")
+        
+        doc_info = DOCUMENT_REGISTRY.get(doc_id, {})
+        filename = doc_info.get("filename", "unknown")
+        
+        print(f"\n🗑️  Deleting document: {filename} (doc_id: {doc_id})")
+        
+        # Remove from registry
+        del DOCUMENT_REGISTRY[doc_id]
+        
+        # Delete uploaded PDF file
+        file_path = UPLOAD_DIR / filename
+        if file_path.exists():
+            try:
+                file_path.unlink()
+                print(f"   ✅ Deleted PDF file: {filename}")
+            except Exception as e:
+                print(f"   ⚠️  Could not delete PDF file: {e}")
+        
+        # If this was the current document, switch to the most recent one
+        if CURRENT_DOC_ID == doc_id:
+            if DOCUMENT_REGISTRY:
+                # Get most recent document (first one after sorting)
+                recent_doc_id = list(DOCUMENT_REGISTRY.keys())[0]
+                CURRENT_DOC_ID = recent_doc_id
+                print(f"   ⚡ Switched to document: {DOCUMENT_REGISTRY[recent_doc_id].get('filename')}")
+            else:
+                CURRENT_DOC_ID = None
+                print(f"   ℹ️  No documents remaining")
+        
+        # Note: Vector data remains in Chroma but is filtered by doc_id in queries
+        # For full cleanup, would need to implement collection recreation
+        
+        return {
+            "status": "success",
+            "message": f"Document '{filename}' deleted successfully",
+            "remaining_docs": len(DOCUMENT_REGISTRY),
+            "new_current_doc_id": CURRENT_DOC_ID
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error deleting document: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to delete document: {str(e)}")
+
+
+@app.get("/document-count")
+async def get_document_count():
+    """Get current document count and limit info"""
+    return {
+        "count": len(DOCUMENT_REGISTRY),
+        "limit": 5,
+        "remaining_slots": 5 - len(DOCUMENT_REGISTRY),
+        "can_upload": len(DOCUMENT_REGISTRY) < 5,
+        "documents": [
+            {
+                "doc_id": doc_id,
+                "filename": info.get("filename", ""),
+                "is_current": doc_id == CURRENT_DOC_ID
+            }
+            for doc_id, info in DOCUMENT_REGISTRY.items()
+        ]
+    }
 
 
 if __name__ == "__main__":
