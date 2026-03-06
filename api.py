@@ -1,14 +1,20 @@
 """
-FastAPI backend for RAG system with PDF upload and Q&A
+FastAPI backend for Engineering Document Intelligence System
+Multimodal RAG: Text + Images + Tables per uploaded PDF
 """
 
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 import shutil
 import os
 import sys
+import json
 from pathlib import Path
+from datetime import datetime
+import base64
 
 # Load environment variables from .env file
 from dotenv import load_dotenv
@@ -19,46 +25,65 @@ sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 try:
-    from backend.pipeline.ingest_pipeline import run_ingestion
-    from backend.vectordb.chroma_client import init_chroma
-    from backend.retrieval.retrieval_pipeline import run_retrieval
-    from backend.retrieval.multimodal_pipeline import MultimodalRetrievalPipeline
-except ImportError:
-    from pipeline.ingest_pipeline import run_ingestion
+    from pipeline.multimodal_ingestion import run_ingestion, get_pipeline
     from vectordb.chroma_client import init_chroma
-    from retrieval.retrieval_pipeline import run_retrieval
-    from retrieval.multimodal_pipeline import MultimodalRetrievalPipeline
+    from retrieval.multimodal_pipeline import run_multimodal_rag
+except ImportError:
+    from backend.pipeline.multimodal_ingestion import run_ingestion, get_pipeline
+    from backend.vectordb.chroma_client import init_chroma
+    from backend.retrieval.multimodal_pipeline import run_multimodal_rag
 
 # Initialize FastAPI
-app = FastAPI(title="RAG System API", version="1.0.0")
+app = FastAPI(
+    title="Engineering Document Intelligence System",
+    description="Multimodal RAG for engineering manuals: text, images, tables",
+    version="2.0.0"
+)
 
 # CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow all origins (configure for production)
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # Setup directories
-UPLOAD_DIR = "uploads"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
+BASE_DIR = Path(__file__).parent
+UPLOAD_DIR = BASE_DIR / "uploads"
+IMAGES_DIR = BASE_DIR / "extracted_images"
+UPLOAD_DIR.mkdir(exist_ok=True)
+IMAGES_DIR.mkdir(exist_ok=True)
 
-# Global collection object
+# Serve extracted images as static files
+app.mount("/images", StaticFiles(directory=str(IMAGES_DIR)), name="images")
+
+# Global state
 collection = None
-multimodal_pipeline = None
+
+# Document registry: maps doc_id -> document info
+# This is the source of truth for "which document is currently active"
+DOCUMENT_REGISTRY: dict = {}
+
+# Track the MOST RECENTLY uploaded document (for single-doc mode)
+CURRENT_DOC_ID: str = None
 
 
+# ============================================================================
 # Pydantic models
+# ============================================================================
+
 class QuestionRequest(BaseModel):
     question: str
+    doc_id: str = None  # Optional: if provided, search only this doc
 
 
 class UploadResponse(BaseModel):
     status: str
     filename: str
     message: str
+    doc_id: str = ""
 
 
 class QuestionResponse(BaseModel):
@@ -67,288 +92,340 @@ class QuestionResponse(BaseModel):
     confidence: float = 0.0
 
 
-# Initialize collection on startup
-@app.on_event("startup")
-async def startup_event():
-    global collection
-    print("🚀 Initializing Chroma database...")
-    collection = init_chroma()
-    print("✅ Database initialized!")
-
-
-@app.get("/health")
-async def health_check():
-    """Health check endpoint"""
-    return {"status": "healthy", "service": "RAG System API"}
-
-
-@app.post("/upload", response_model=UploadResponse)
-async def upload_pdf(file: UploadFile = File(...)):
-    """
-    Upload and ingest a PDF file
-    """
-    try:
-        # Validate file type
-        if not file.filename.endswith('.pdf'):
-            raise HTTPException(status_code=400, detail="Only PDF files are supported")
-        
-        # Validate file size (max 500MB)
-        file_size = 0
-        file_content = await file.read()
-        file_size = len(file_content)
-        
-        if file_size == 0:
-            raise HTTPException(status_code=400, detail="File is empty")
-        
-        if file_size > 500 * 1024 * 1024:  # 500MB limit
-            raise HTTPException(status_code=400, detail="File size exceeds 500MB limit")
-        
-        # Reset file pointer and save
-        await file.seek(0)
-        file_path = os.path.join(UPLOAD_DIR, file.filename)
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-        
-        print(f"\n📄 Uploading: {file.filename} ({file_size / 1024 / 1024:.2f}MB)")
-        
-        # Run ingestion
-        print(f"� Processing PDF...")
-        run_ingestion(file_path)
-        print(f"✅ Successfully ingested {file.filename}\n")
-        
-        return UploadResponse(
-            status="success",
-            filename=file.filename,
-            message=f"PDF '{file.filename}' uploaded and ingested successfully!"
-        )
-    
-    except HTTPException:
-        raise
-    except Exception as e:
-        error_msg = str(e)
-        print(f"❌ Error during ingestion: {error_msg}\n")
-        raise HTTPException(status_code=500, detail=f"Ingestion failed: {error_msg}")
-
-
-@app.post("/ask", response_model=QuestionResponse)
-async def ask_question(request: QuestionRequest):
-    """
-    Ask a question about the ingested documents
-    """
-    try:
-        if not request.question.strip():
-            raise HTTPException(status_code=400, detail="Question cannot be empty")
-        
-        if collection is None:
-            raise HTTPException(status_code=503, detail="Database not initialized")
-        
-        print(f"🔎 Processing question: {request.question}")
-        
-        # Run retrieval pipeline
-        result = run_retrieval(collection, request.question)
-        
-        # Extract response (handle different return formats)
-        if isinstance(result, dict):
-            response_text = result.get("response", "No answer found")
-            source_chunks = result.get("source_chunks", [])
-            confidence = result.get("confidence", 0.0)
-        else:
-            response_text = str(result) if result else "No answer found"
-            source_chunks = []
-            confidence = 0.0
-        
-        return QuestionResponse(
-            response=response_text,
-            source_chunks=source_chunks,
-            confidence=confidence
-        )
-    
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"❌ Error during retrieval: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Question processing failed: {str(e)}")
-
-
-@app.get("/documents")
-async def get_documents():
-    """
-    Get list of ingested documents
-    """
-    try:
-        if collection is None:
-            return {"documents": []}
-        
-        # Get all documents from collection
-        documents = collection.get()
-        doc_list = []
-        
-        if documents and "documents" in documents:
-            for i, doc in enumerate(documents["documents"]):
-                doc_list.append({
-                    "id": documents["ids"][i] if "ids" in documents else str(i),
-                    "content": doc[:200] + "..." if len(doc) > 200 else doc
-                })
-        
-        return {"documents": doc_list, "count": len(doc_list)}
-    
-    except Exception as e:
-        print(f"❌ Error fetching documents: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to fetch documents: {str(e)}")
-
-
-# ============================================================================
-# MULTIMODAL ENDPOINTS - Image, Table, and Cross-modal Retrieval
-# ============================================================================
-
 class MultimodalQuestionResponse(BaseModel):
     response: str
     text_sources: list = []
     image_sources: list = []
     table_sources: list = []
     confidence: float = 0.0
+    doc_id: str = ""
+    modalities: dict = {}
 
+
+# ============================================================================
+# Startup
+# ============================================================================
+
+@app.on_event("startup")
+async def startup_event():
+    global collection
+    print("🚀 Initializing Engineering Document Intelligence System...")
+    collection = init_chroma()
+    print("✅ Vector database initialized!")
+
+
+# ============================================================================
+# Health & Info
+# ============================================================================
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    return {
+        "status": "healthy",
+        "service": "Engineering Document Intelligence System",
+        "version": "2.0.0",
+        "current_doc": CURRENT_DOC_ID
+    }
+
+
+@app.get("/documents")
+async def get_documents():
+    """Get list of all uploaded/ingested documents"""
+    try:
+        docs = []
+        for doc_id, info in DOCUMENT_REGISTRY.items():
+            docs.append({
+                "doc_id": doc_id,
+                "name": info.get("name", ""),
+                "filename": info.get("filename", ""),
+                "timestamp": info.get("timestamp", ""),
+                "text_chunks": info.get("text_chunks", 0),
+                "images": info.get("images", 0),
+                "tables": info.get("tables", 0),
+                "total_vectors": info.get("total_vectors", 0),
+                "is_current": doc_id == CURRENT_DOC_ID
+            })
+        # Most recent first
+        docs.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+        return {
+            "documents": docs,
+            "count": len(docs),
+            "current_doc_id": CURRENT_DOC_ID
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch documents: {str(e)}")
+
+
+@app.get("/current-document")
+async def get_current_document():
+    """Get the most recently uploaded document info"""
+    if not CURRENT_DOC_ID:
+        return {"doc_id": None, "message": "No document uploaded yet"}
+    info = DOCUMENT_REGISTRY.get(CURRENT_DOC_ID, {})
+    return {
+        "doc_id": CURRENT_DOC_ID,
+        **info
+    }
+
+
+# ============================================================================
+# PDF Upload
+# ============================================================================
+
+@app.post("/upload", response_model=UploadResponse)
+async def upload_pdf(file: UploadFile = File(...)):
+    """
+    Upload and ingest a PDF file.
+    After upload, all /ask-multimodal calls will use THIS document
+    unless a specific doc_id is provided.
+    """
+    global CURRENT_DOC_ID
+
+    try:
+        # Validate file type
+        if not file.filename.lower().endswith('.pdf'):
+            raise HTTPException(status_code=400, detail="Only PDF files are supported")
+
+        # Read file content
+        file_content = await file.read()
+        file_size = len(file_content)
+
+        if file_size == 0:
+            raise HTTPException(status_code=400, detail="File is empty")
+
+        if file_size > 500 * 1024 * 1024:  # 500MB limit
+            raise HTTPException(status_code=400, detail="File size exceeds 500MB limit")
+
+        # Save file
+        safe_filename = Path(file.filename).name  # Remove any path components
+        file_path = UPLOAD_DIR / safe_filename
+        with open(str(file_path), "wb") as buffer:
+            buffer.write(file_content)
+
+        print(f"\n📄 Uploading: {file.filename} ({file_size / 1024 / 1024:.2f}MB)")
+
+        # Run multimodal ingestion (returns doc_id)
+        print(f"🔄 Processing PDF with multimodal pipeline...")
+        pipeline = get_pipeline()
+        doc_id = pipeline.ingest_document(str(file_path))
+
+        # Get registration info from the pipeline
+        registry = pipeline.get_document_registry()
+        doc_info = registry.get(doc_id, {})
+
+        # Update global registry
+        DOCUMENT_REGISTRY[doc_id] = {
+            **doc_info,
+            "filename": safe_filename,
+            "timestamp": datetime.now().isoformat()
+        }
+
+        # Set as current document
+        CURRENT_DOC_ID = doc_id
+
+        print(f"✅ Successfully ingested: {file.filename} (doc_id: {doc_id})\n")
+
+        return UploadResponse(
+            status="success",
+            filename=file.filename,
+            message=f"PDF '{file.filename}' uploaded and processed successfully! "
+                    f"Extracted {doc_info.get('text_chunks', 0)} text chunks, "
+                    f"{doc_info.get('images', 0)} images, "
+                    f"{doc_info.get('tables', 0)} tables.",
+            doc_id=doc_id
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        error_msg = str(e)
+        print(f"❌ Error during ingestion: {error_msg}\n")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Ingestion failed: {error_msg}")
+
+
+# ============================================================================
+# Q&A Endpoints
+# ============================================================================
 
 @app.post("/ask-multimodal", response_model=MultimodalQuestionResponse)
 async def ask_multimodal_question(request: QuestionRequest):
     """
-    Ask a question with multimodal retrieval
-    Finds answers in text, images, tables, and diagrams
+    Ask a question with multimodal retrieval.
+    
+    - If doc_id is provided -> search only that document
+    - If no doc_id -> search the most recently uploaded document (CURRENT_DOC_ID)
+    - This ensures answers come from the CURRENT PDF, not previous ones
     """
     try:
         if not request.question.strip():
             raise HTTPException(status_code=400, detail="Question cannot be empty")
-        
-        if collection is None:
-            raise HTTPException(status_code=503, detail="Database not initialized")
-        
-        print(f"🔎 Processing multimodal question: {request.question}")
-        
-        # Run multimodal pipeline if available
-        if multimodal_pipeline:
-            try:
-                result = multimodal_pipeline.run_full_pipeline(request.question)
-                
-                return MultimodalQuestionResponse(
-                    response=result.get("answer", "No answer found"),
-                    text_sources=[s for s in result.get("sources", []) if s.get("type") == "text"],
-                    image_sources=[s for s in result.get("sources", []) if s.get("type") == "image"],
-                    table_sources=[s for s in result.get("sources", []) if s.get("type") == "table"],
-                    confidence=0.85
-                )
-            except Exception as e:
-                print(f"⚠️  Multimodal pipeline error: {e}, falling back to text retrieval")
-        
-        # Fallback to regular retrieval if multimodal not available
-        result = run_retrieval(collection, request.question)
-        
-        if isinstance(result, dict):
-            response_text = result.get("response", "No answer found")
-            source_chunks = result.get("source_chunks", [])
-        else:
-            response_text = str(result) if result else "No answer found"
-            source_chunks = []
-        
-        return MultimodalQuestionResponse(
-            response=response_text,
-            text_sources=[{"type": "text", "content": chunk} for chunk in source_chunks],
-            confidence=0.75
+
+        # Determine which document to search
+        target_doc_id = request.doc_id or CURRENT_DOC_ID
+
+        if not target_doc_id:
+            raise HTTPException(
+                status_code=400,
+                detail="No document uploaded yet. Please upload a PDF first."
+            )
+
+        doc_info = DOCUMENT_REGISTRY.get(target_doc_id, {})
+        doc_name = doc_info.get("name") or doc_info.get("filename", "uploaded document")
+
+        print(f"\n🔎 Question: {request.question}")
+        print(f"📋 Searching document: {doc_name} (doc_id: {target_doc_id})")
+
+        # Run multimodal RAG with strict document filtering
+        result = run_multimodal_rag(
+            query=request.question,
+            doc_id=target_doc_id,
+            top_k=5
         )
-    
+
+        if result.get("error"):
+            print(f"❌ Pipeline error: {result['error']}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Question processing failed: {result['error']}"
+            )
+
+        return MultimodalQuestionResponse(
+            response=result.get("answer", "No answer found"),
+            text_sources=result.get("sources", []),
+            image_sources=result.get("images_referenced", []),
+            table_sources=[],  # Tables are included in sources
+            confidence=result.get("confidence", 0.0),
+            doc_id=target_doc_id,
+            modalities=result.get("modalities", {})
+        )
+
     except HTTPException:
         raise
     except Exception as e:
         print(f"❌ Error in multimodal retrieval: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Multimodal question processing failed: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Multimodal question processing failed: {str(e)}"
+        )
 
 
-@app.get("/retrieve-images")
-async def retrieve_images(query: str):
+@app.post("/ask")
+async def ask_question(request: QuestionRequest):
     """
-    Retrieve images most relevant to a query
-    Uses CLIP embeddings for cross-modal search
+    Legacy text-only Q&A endpoint.
+    Delegates to /ask-multimodal for consistency.
     """
+    response = await ask_multimodal_question(request)
+    return {
+        "response": response.response,
+        "source_chunks": response.text_sources,
+        "confidence": response.confidence
+    }
+
+
+# ============================================================================
+# Image serving
+# ============================================================================
+
+@app.get("/image/{image_filename}")
+async def get_image(image_filename: str):
+    """Serve extracted images to frontend"""
     try:
-        if not query.strip():
-            raise HTTPException(status_code=400, detail="Query cannot be empty")
-        
-        if not multimodal_pipeline:
-            return {"images": [], "message": "Multimodal pipeline not initialized"}
-        
-        print(f"🖼️  Retrieving images for: {query}")
-        
-        retrieved = multimodal_pipeline._retrieve_images(query, top_k=5)
-        
-        return {
-            "query": query,
-            "images": retrieved,
-            "count": len(retrieved)
+        # Security: prevent directory traversal
+        if ".." in image_filename or "/" in image_filename:
+            raise HTTPException(status_code=400, detail="Invalid image filename")
+
+        image_path = IMAGES_DIR / image_filename
+
+        if not image_path.exists():
+            print(f"⚠️  Image not found: {image_path}")
+            raise HTTPException(status_code=404, detail=f"Image not found: {image_filename}")
+
+        # Determine content type
+        ext = image_path.suffix.lower()
+        media_types = {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".gif": "image/gif",
+            ".webp": "image/webp"
         }
-    
+        media_type = media_types.get(ext, "image/png")
+
+        return FileResponse(str(image_path), media_type=media_type)
+
     except HTTPException:
         raise
     except Exception as e:
-        print(f"❌ Error retrieving images: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Image retrieval failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error serving image: {str(e)}")
 
 
-@app.get("/retrieve-tables")
-async def retrieve_tables(query: str):
-    """
-    Retrieve tables most relevant to a query
-    """
+@app.get("/image-base64/{image_filename}")
+async def get_image_base64(image_filename: str):
+    """Get image as base64 encoded string"""
     try:
-        if not query.strip():
-            raise HTTPException(status_code=400, detail="Query cannot be empty")
-        
-        if not multimodal_pipeline:
-            return {"tables": [], "message": "Multimodal pipeline not initialized"}
-        
-        print(f"📊 Retrieving tables for: {query}")
-        
-        retrieved = multimodal_pipeline._retrieve_tables(query)
-        
-        return {
-            "query": query,
-            "tables": retrieved,
-            "count": len(retrieved)
+        if ".." in image_filename or "/" in image_filename:
+            raise HTTPException(status_code=400, detail="Invalid image filename")
+
+        image_path = IMAGES_DIR / image_filename
+
+        if not image_path.exists():
+            raise HTTPException(status_code=404, detail=f"Image not found: {image_filename}")
+
+        with open(str(image_path), "rb") as img_file:
+            image_data = base64.b64encode(img_file.read()).decode("utf-8")
+
+        ext = image_path.suffix.lower()
+        mime_types = {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".gif": "image/gif",
+            ".webp": "image/webp"
         }
-    
+        mime_type = mime_types.get(ext, "image/png")
+
+        return {
+            "filename": image_filename,
+            "base64": f"data:{mime_type};base64,{image_data}"
+        }
+
     except HTTPException:
         raise
     except Exception as e:
-        print(f"❌ Error retrieving tables: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Table retrieval failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error encoding image: {str(e)}")
 
 
-@app.get("/query-analysis")
-async def analyze_query(query: str):
-    """
-    Analyze query to determine what type of information to retrieve
-    Returns: primary modality, secondary modalities, confidence
-    """
+@app.get("/document-images/{doc_id}")
+async def get_document_images(doc_id: str):
+    """Get all images extracted from a specific document"""
     try:
-        if not query.strip():
-            raise HTTPException(status_code=400, detail="Query cannot be empty")
-        
-        from retrieval.multimodal_router import MultimodalQueryRouter
-        router = MultimodalQueryRouter()
-        analysis = router.analyze_query(query)
-        
-        return {
-            "query": query,
-            "primary_modality": analysis["primary_modality"].value,
-            "secondary_modalities": [m.value for m in analysis["secondary_modalities"]],
-            "confidence": analysis["confidence"],
-            "recommendation": analysis["recommendation"],
-            "keywords_found": analysis["keywords_found"]
-        }
-    
+        doc_info = DOCUMENT_REGISTRY.get(doc_id)
+        if not doc_info:
+            raise HTTPException(status_code=404, detail=f"Document not found: {doc_id}")
+
+        # List images with doc_name prefix
+        doc_name = doc_info.get("name", "")
+        images = []
+        for img_path in IMAGES_DIR.iterdir():
+            if img_path.is_file() and img_path.suffix.lower() in [".png", ".jpg", ".jpeg"]:
+                images.append({
+                    "filename": img_path.name,
+                    "url": f"/image/{img_path.name}",
+                    "size": img_path.stat().st_size
+                })
+
+        return {"doc_id": doc_id, "images": images, "count": len(images)}
+
     except HTTPException:
         raise
     except Exception as e:
-        print(f"❌ Error analyzing query: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Query analysis failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":

@@ -1,45 +1,32 @@
 # retrieval/retrieval_pipeline.py
+# Legacy retrieval pipeline - kept for backward compatibility
+# For new code, use multimodal_pipeline.py instead
 
 try:
-    from retrieval.self_improving_pipeline import run_self_improving_retrieval
+    from retrieval.multimodal_pipeline import run_multimodal_rag
 except ImportError:
-    from self_improving_pipeline import run_self_improving_retrieval
+    from multimodal_pipeline import run_multimodal_rag
 
 
-def run_retrieval(collection, query: str, use_answer_generation: bool = True):
+def run_retrieval(collection, query: str, use_answer_generation: bool = True, doc_id: str = None):
     """
-    Complete RAG pipeline with retrieval and answer generation
-    
+    Complete RAG pipeline - delegates to multimodal pipeline
+
     Args:
-        collection: Chroma collection
+        collection: Chroma collection (not used - multimodal pipeline manages this)
         query: User question
-        use_answer_generation: Whether to generate LLM answer (Phase 5)
-        
+        use_answer_generation: Whether to generate LLM answer (always generates)
+        doc_id: Document ID to filter by (CRITICAL for per-doc isolation)
+
     Returns:
         Dictionary with answer, sources, and metadata
     """
 
-    print(f"\n{'='*60}")
-    print(f"� RAG PIPELINE START")
-    print(f"{'='*60}")
-    print(f"Query: {query}")
-    print(f"Answer Generation: {use_answer_generation}")
-    print(f"{'='*60}\n")
+    result = run_multimodal_rag(query, doc_id=doc_id, top_k=5)
 
-    # Use self-improving retrieval with answer generation
-    result = run_self_improving_retrieval(
-        collection, 
-        query, 
-        max_attempts=3,
-        generate_final_answer=use_answer_generation
-    )
-
-    print(f"\n{'='*60}")
-    print(f"🎯 RAG PIPELINE COMPLETE")
-    print(f"{'='*60}")
-    print(f"✅ Final Answer Generated: {len(result.get('response', ''))} characters")
-    print(f"📊 Chunks Retrieved: {result.get('chunks_count', 0)}")
-    print(f"🎯 Confidence: {result.get('confidence', 0):.2%}")
-    print(f"{'='*60}\n")
-
-    return result
+    return {
+        "response": result.get("answer", "No answer found"),
+        "source_chunks": result.get("sources", []),
+        "confidence": result.get("confidence", 0.0),
+        "images_referenced": result.get("images_referenced", []),
+    }

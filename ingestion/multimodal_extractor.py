@@ -25,7 +25,8 @@ class MultimodalExtractor:
 
     def __init__(self, pdf_path: str):
         self.pdf_path = pdf_path
-        self.images_dir = Path("extracted_images")
+        # Use absolute path relative to this file so images always go to backend/extracted_images/
+        self.images_dir = Path(__file__).parent.parent / "extracted_images"
         self.images_dir.mkdir(exist_ok=True)
         self.doc = None
         self.image_count = 0

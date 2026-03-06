@@ -1,96 +1,67 @@
-# main.py
+# main.py - MULTIMODAL RAG SYSTEM
 
-"""
-Entry point for Query-Adaptive + Explainable RAG system.
-
-Phases:
-1. Ingestion
-2. Adaptive Retrieval
-3. Advanced Retrieval
-4. Agentic Retrieval
-5. Self-Improving Retrieval
-"""
+# CRITICAL: RUN_INGESTION Flag
+# ===========================
+# RUN_INGESTION = True:
+#   - Use ONLY on FIRST RUN or when adding NEW PDFs
+#   - Extracts text, images, tables from PDF files  
+#   - Embeds all with CLIP (creates vector embeddings)
+#   - Stores everything in Chroma vector database
+#   - Takes TIME (slower) - don't set True on every run!
+#
+# RUN_INGESTION = False:
+#   - Use for SUBSEQUENT RUNS after initial ingestion
+#   - Skips extraction/embedding (FAST)
+#   - Uses already-indexed documents in Chroma
+#   - You can still ask questions and get answers
+#   - Recommended for testing and demos
+#
+# WORKFLOW:
+# 1. First time: Set RUN_INGESTION = True, run script
+# 2. Subsequent times: Set RUN_INGESTION = False, run script  
+# 3. Adding new PDF: Set RUN_INGESTION = True again
 
 from pipeline.ingest_pipeline import run_ingestion
 from vectordb.chroma_client import init_chroma
+from retrieval.multimodal_pipeline import run_multimodal_rag
 
-from retrieval.retrieval_pipeline import run_retrieval
-from retrieval.advanced_pipeline import run_advanced_retrieval
-from retrieval.agentic_pipeline import run_agentic_retrieval
-from retrieval.self_improving_pipeline import run_self_improving_retrieval
+RUN_INGESTION = True  # SET TO TRUE FOR FIRST RUN - now fresh start!
 
 
-# 🔑 IMPORTANT — set True only first run
-RUN_INGESTION = False
-
-
-# ---------------- Phase 2 + 3 ----------------
-def demo_queries(collection):
-
-    queries = [
-        "What does the figure show?",
-        "Show the results table",
-        "Explain the methodology"
-    ]
-
-    print("\n================ Phase 2: Adaptive Retrieval ================\n")
-    for q in queries:
-        run_retrieval(collection, q)
-
-    print("\n================ Phase 3: Advanced Retrieval ================\n")
-    for q in queries:
-        run_advanced_retrieval(collection, q)
-
-
-# ---------------- Phase 4 ----------------
-def demo_agentic(collection):
-
-    queries = [
-        "What does the figure show?",
-        "Compare the results",
-        "Explain methodology"
-    ]
-
-    print("\n================ Phase 4: Agentic Retrieval ================\n")
-
-    for q in queries:
-        run_agentic_retrieval(collection, q)
-
-
-# ---------------- Phase 5 ----------------
-def demo_self_improving(collection):
-
-    queries = [
-        "What does the figure show?",
-        "Explain the dataset",
-        "How are tables extracted?"
-    ]
-
-    print("\n================ Phase 5: Self-Improving Retrieval ================\n")
-
-    for q in queries:
-        run_self_improving_retrieval(collection, q)
-
-
-# ---------------- MAIN ----------------
 def main():
-
-    # Phase 1 — ingestion (run once only)
+    print("\n" + "="*70)
+    print("MULTIMODAL RAG SYSTEM")
+    print("="*70)
+    
+    # Phase 1: INGESTION (only on first run)
     if RUN_INGESTION:
-        print("\n🚀 Running ingestion (one-time step)\n")
+        print("\nWARNING: RUN_INGESTION = True")
+        print("Starting document ingestion...")
         run_ingestion()
-
-    # Init vector DB
+        print("\nNext time, set RUN_INGESTION = False\n")
+    else:
+        print("\nRUN_INGESTION = False (using cached documents)\n")
+    
+    # Phase 2: Initialize database
+    print("Initializing vector database...")
     collection = init_chroma()
-
-    # Phase 2 + 3
-    demo_queries(collection)
-
-    # Phase 4
-    demo_agentic(collection)
-
-    # Phase 5
-    demo_self_improving(collection)
+    print("Ready!\n")
+    
+    # Phase 3: Test queries
+    queries = [
+        "What is the main topic?",
+        "Explain key concepts",
+    ]
+    
+    for query in queries:
+        print(f"\nQuery: {query}")
+        try:
+            result = run_multimodal_rag(query)
+            print(f"Answer: {result['answer'][:200]}...")
+        except Exception as e:
+            print(f"Error: {e}")
+    
+    print("\n" + "="*70)
 
 
 if __name__ == "__main__":
