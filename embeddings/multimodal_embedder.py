@@ -35,12 +35,20 @@ class MultimodalEmbedder:
         self.device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
         print(f"📍 Using device: {self.device}")
         
-        self.processor = CLIPProcessor.from_pretrained(model_name)
-        self.model = CLIPModel.from_pretrained(model_name).to(self.device)
-        self.model.eval()  # Inference mode
-        
-        self.embedding_dim = self.model.text_projection.out_features
-        print(f"✅ CLIP ready. Embedding dimension: {self.embedding_dim}")
+        try:
+            self.processor = CLIPProcessor.from_pretrained(model_name)
+            self.model = CLIPModel.from_pretrained(model_name).to(self.device)
+            self.model.eval()  # Inference mode
+            
+            self.embedding_dim = self.model.text_projection.out_features
+            print(f"✅ CLIP ready. Embedding dimension: {self.embedding_dim}")
+            print(f"   Max sequence length: 77 tokens")
+        except Exception as e:
+            print(f"❌ Error loading CLIP model: {e}")
+            print("   Falling back to text-only mode (no vision)")
+            self.processor = None
+            self.model = None
+            self.embedding_dim = 512  # Standard CLIP dim
 
     def embed_text(self, texts: Union[str, List[str]]) -> np.ndarray:
         """
@@ -55,13 +63,39 @@ class MultimodalEmbedder:
         if isinstance(texts, str):
             texts = [texts]
         
-        with torch.no_grad():
-            inputs = self.processor(text=texts, return_tensors="pt", padding=True).to(self.device)
-            text_embeddings = self.model.get_text_features(**inputs)
-            # Normalize embeddings
-            text_embeddings = text_embeddings / text_embeddings.norm(p=2, dim=-1, keepdim=True)
+        # Fallback if model not loaded
+        if self.model is None:
+            print(f"⚠️  Model not available, returning zero embeddings")
+            return np.zeros((len(texts), self.embedding_dim), dtype=np.float32)
         
-        return text_embeddings.cpu().numpy()
+        try:
+            with torch.no_grad():
+                inputs = self.processor(text=texts, return_tensors="pt", padding=True).to(self.device)
+                text_output = self.model.get_text_features(**inputs)
+                
+                # Handle both direct tensor and BaseModelOutputWithPooling outputs
+                if hasattr(text_output, 'pooler_output'):
+                    text_embeddings = text_output.pooler_output
+                elif hasattr(text_output, 'last_hidden_state'):
+                    # Use mean pooling for last hidden state
+                    text_embeddings = text_output.last_hidden_state.mean(dim=1)
+                else:
+                    text_embeddings = text_output
+                
+                # Ensure it's a tensor
+                if not isinstance(text_embeddings, torch.Tensor):
+                    text_embeddings = torch.tensor(text_embeddings, device=self.device)
+                
+                # Normalize embeddings with proper error handling
+                norm = torch.norm(text_embeddings, p=2, dim=-1, keepdim=True)
+                norm = torch.clamp(norm, min=1e-12)  # Prevent division by zero
+                text_embeddings = text_embeddings / norm
+            
+            return text_embeddings.cpu().numpy()
+        except Exception as e:
+            print(f"⚠️  Error in embed_text: {e}")
+            # Return zero embedding as fallback
+            return np.zeros((len(texts), self.embedding_dim), dtype=np.float32)
     
     def embed_image(self, image_paths: Union[str, List[str]]) -> np.ndarray:
         """
@@ -75,6 +109,11 @@ class MultimodalEmbedder:
         """
         if isinstance(image_paths, str):
             image_paths = [image_paths]
+        
+        # Fallback if model not loaded
+        if self.model is None:
+            print(f"⚠️  Model not available, returning zero embeddings for {len(image_paths)} images")
+            return np.zeros((len(image_paths), self.embedding_dim), dtype=np.float32)
         
         images = []
         for img_path in image_paths:
@@ -90,15 +129,36 @@ class MultimodalEmbedder:
                 continue
         
         if not images:
-            return np.array([])
+            return np.zeros((len(image_paths), self.embedding_dim), dtype=np.float32)
         
-        with torch.no_grad():
-            inputs = self.processor(images=images, return_tensors="pt", padding=True).to(self.device)
-            image_embeddings = self.model.get_image_features(**inputs)
-            # Normalize embeddings
-            image_embeddings = image_embeddings / image_embeddings.norm(p=2, dim=-1, keepdim=True)
-        
-        return image_embeddings.cpu().numpy()
+        try:
+            with torch.no_grad():
+                inputs = self.processor(images=images, return_tensors="pt", padding=True).to(self.device)
+                image_output = self.model.get_image_features(**inputs)
+                
+                # Handle both direct tensor and BaseModelOutputWithPooling outputs
+                if hasattr(image_output, 'pooler_output'):
+                    image_embeddings = image_output.pooler_output
+                elif hasattr(image_output, 'last_hidden_state'):
+                    # Use mean pooling for last hidden state
+                    image_embeddings = image_output.last_hidden_state.mean(dim=1)
+                else:
+                    image_embeddings = image_output
+                
+                # Ensure it's a tensor
+                if not isinstance(image_embeddings, torch.Tensor):
+                    image_embeddings = torch.tensor(image_embeddings, device=self.device)
+                
+                # Normalize embeddings with proper error handling
+                norm = torch.norm(image_embeddings, p=2, dim=-1, keepdim=True)
+                norm = torch.clamp(norm, min=1e-12)  # Prevent division by zero
+                image_embeddings = image_embeddings / norm
+            
+            return image_embeddings.cpu().numpy()
+        except Exception as e:
+            print(f"⚠️  Error in embed_image: {e}")
+            # Return zero embeddings as fallback
+            return np.zeros((len(images), self.embedding_dim), dtype=np.float32)
     
     def embed_table(self, table_text: str) -> np.ndarray:
         """

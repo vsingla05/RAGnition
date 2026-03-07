@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 try:
     from unstructured.partition.pdf import partition_pdf
 except ImportError:
-    print("⚠️  unstructured not available, will use fallback parser")
+    print(" unstructured not available, will use fallback parser")
     partition_pdf = None
 
 
@@ -75,6 +75,6 @@ def extract_pdf_multimodal(pdf_path: str) -> List[Tuple[str, Dict]]:
 
         results.append((text, metadata))
         
-    print(f"✅ Successfully extracted {len(results)} elements from PDF")
+    print(f" Successfully extracted {len(results)} elements from PDF")
 
     return results

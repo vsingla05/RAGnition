@@ -154,7 +154,23 @@ Retrieved Document Content:
 {context}
 
 Please provide a comprehensive, technically accurate answer based ONLY on the above document content AND the provided images.
-Include relevant page citations and reference any figures or tables mentioned."""
+Include relevant page citations and reference any figures or tables mentioned.
+
+After your answer, you MUST objectively evaluate the retrieval quality for this query by analyzing the retrieved chunks.
+Count the following:
+TP (True Positives): Number of retrieved sources/facts that were relevant and useful to answer the query.
+FP (False Positives): Number of retrieved sources/facts that were NOT relevant or useful.
+FN (False Negatives): Estimated number of missing facts/sources needed to fully answer the query but not retrieved.
+(Note: Precision = TP / (TP + FP) and Recall = TP / (TP + FN))
+
+Format your response exactly like this:
+ANSWER:
+[Your comprehensive answer here]
+TP: [number]
+FP: [number]
+FN: [number]
+PRECISION: [Score between 0.00 and 1.00]
+RECALL: [Score between 0.00 and 1.00]"""
 
             print(f"📬 Sending to Gemini 2.5 Flash...")
             print(f"   📝 Text sources: {len(text_items)}")
@@ -174,7 +190,56 @@ Include relevant page citations and reference any figures or tables mentioned.""
                 )
             )
 
-            answer_text = response.text if response.text else "No answer could be generated."
+            import re
+            
+            answer_text = "No answer could be generated."
+            precision_score = 0.0
+            recall_score = 0.0
+            tp_score = 0
+            fp_score = 0
+            fn_score = 0
+            tn_score = 0  # we hardcode or ignore TN or default to 0 suitable for UI display
+
+            if response.text:
+                full_text = response.text
+                
+                # Extract TP
+                tp_match = re.search(r"TP:\s*([0-9]+)", full_text)
+                if tp_match:
+                    try: tp_score = int(tp_match.group(1))
+                    except: pass
+                    
+                # Extract FP
+                fp_match = re.search(r"FP:\s*([0-9]+)", full_text)
+                if fp_match:
+                    try: fp_score = int(fp_match.group(1))
+                    except: pass
+                    
+                # Extract FN
+                fn_match = re.search(r"FN:\s*([0-9]+)", full_text)
+                if fn_match:
+                    try: fn_score = int(fn_match.group(1))
+                    except: pass
+
+                # Extract Precision
+                prec_match = re.search(r"PRECISION:\s*([0-1]?\.?[0-9]+)", full_text)
+                if prec_match:
+                    try: precision_score = float(prec_match.group(1))
+                    except ValueError: pass
+                        
+                # Extract Recall
+                rec_match = re.search(r"RECALL:\s*([0-1]?\.?[0-9]+)", full_text)
+                if rec_match:
+                    try: recall_score = float(rec_match.group(1))
+                    except ValueError: pass
+                        
+                # Extract Answer
+                ans_match = re.search(r"ANSWER:\s*(.*?)(?=\nTP:|\nPRECISION:|$)", full_text, flags=re.DOTALL)
+                if ans_match:
+                    answer_text = ans_match.group(1).strip()
+                else:
+                    # fallback if regex fails
+                    answer_text = full_text.split("TP:")[0].split("PRECISION:")[0].replace("ANSWER:", "").strip()
 
             # Estimate confidence based on retrieval quality
             total_retrieved = retrieved.get("total_retrieved", 0)
@@ -244,6 +309,12 @@ Include relevant page citations and reference any figures or tables mentioned.""
                 "sources": sources,
                 "images_referenced": images_for_frontend,
                 "confidence": confidence,
+                "precision": precision_score,
+                "recall": recall_score,
+                "tp": tp_score,
+                "fp": fp_score,
+                "fn": fn_score,
+                "tn": tn_score,
                 "total_sources": len(sources),
                 "modalities": {
                     "text": len(text_items),
@@ -261,6 +332,12 @@ Include relevant page citations and reference any figures or tables mentioned.""
                 "sources": [],
                 "images_referenced": [],
                 "confidence": 0.0,
+                "precision": 0.0,
+                "recall": 0.0,
+                "tp": 0,
+                "fp": 0,
+                "fn": 0,
+                "tn": 0,
                 "total_sources": 0,
                 "modalities": {"text": 0, "tables": 0, "images": 0},
                 "error": str(e)

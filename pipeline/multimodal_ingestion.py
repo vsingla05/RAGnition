@@ -18,11 +18,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 try:
     from ingestion.pdf_parser import extract_pdf_multimodal
     from ingestion.multimodal_extractor import MultimodalExtractor
+    from ingestion.figure_extractor import process_pdf_for_figures
     from vectordb.chroma_client import init_chroma, store_chunks, delete_document
     from embeddings.multimodal_embedder import MultimodalEmbedder
 except ImportError:
     from backend.ingestion.pdf_parser import extract_pdf_multimodal
     from backend.ingestion.multimodal_extractor import MultimodalExtractor
+    from backend.ingestion.figure_extractor import process_pdf_for_figures
     from backend.vectordb.chroma_client import init_chroma, store_chunks, delete_document
     from backend.embeddings.multimodal_embedder import MultimodalEmbedder
 
@@ -139,6 +141,18 @@ class MultimodalIngestionPipeline:
             raw_tables = extracted_data.get("tables", [])
             print(f"✅ Extracted {len(images)} images, {len(raw_tables)} tables")
 
+            # Extract FIGURES with captions and metadata
+            print("\n🎨 Extracting figures with captions...")
+            try:
+                indexed_figures, fig_summary = process_pdf_for_figures(pdf_path, images, "\n".join([item.get("text", "") for item in text_items]))
+                print(f"✅ Extracted {fig_summary['total_figures']} figures with captions and metadata")
+                print(f"   📊 By type: {fig_summary['by_type']}")
+                print(f"   📍 By section: {fig_summary.get('by_section', {})}")
+            except Exception as e:
+                print(f"⚠️  Figure extraction failed: {e}")
+                indexed_figures = []
+                fig_summary = {"total_figures": 0, "by_type": {}}
+
             # Process tables
             table_items = []
             for idx, table in enumerate(raw_tables):
@@ -168,6 +182,20 @@ class MultimodalIngestionPipeline:
                 embedded_images = self._embed_images(images, doc_id, doc_name, filename)
                 embedded_items.extend(embedded_images)
                 print(f"✅ Embedded {len(embedded_images)} images")
+
+            # Store INDEXED FIGURES with captions and metadata
+            if indexed_figures:
+                print(f"\n🎨 Storing {len(indexed_figures)} indexed figures...")
+                figure_items = []
+                for fig in indexed_figures:
+                    figure_items.append({
+                        "text": fig.get("content", ""),
+                        "type": "figure",
+                        "modality": "figure",
+                        "metadata": fig.get("metadata", {})
+                    })
+                embedded_items.extend(figure_items)
+                print(f"✅ Stored {len(figure_items)} figures with descriptions")
 
             # Embed TABLES
             if table_items:
@@ -201,6 +229,7 @@ class MultimodalIngestionPipeline:
             print(f"\n📈 Statistics:")
             print(f"   📝 Text chunks: {len(embedded_text)}")
             print(f"   🖼️  Images: {len(images)}")
+            print(f"   🎨 Figures: {fig_summary.get('total_figures', 0)}")
             print(f"   📊 Tables: {len(table_items)}")
             print(f"   📦 Total vectors: {len(embedded_items)}")
             print(f"\n✨ TRUE MULTIMODAL INDEXING COMPLETE\n")
@@ -213,6 +242,7 @@ class MultimodalIngestionPipeline:
                 "timestamp": datetime.now().isoformat(),
                 "text_chunks": len(embedded_text),
                 "images": len(images),
+                "figures": fig_summary.get('total_figures', 0),
                 "tables": len(table_items),
                 "total_vectors": len(embedded_items)
             }
@@ -313,25 +343,29 @@ class MultimodalIngestionPipeline:
         return items
 
     def _embed_text_items(self, text_items: List[Dict]) -> List[Dict]:
-        """Embed text items — uses CLIP if available, else returns without custom embedding"""
+        """
+        Store text items without custom embeddings.
+        Chroma will use its own sentence-transformer embedder (384-dim, better for text).
+        """
         embedded = []
         for item in text_items[:200]:  # Limit per doc
             try:
                 result = dict(item)
-                if self.embedder:
-                    emb = self.embedder.embed_text(item["text"])
-                    result["embedding"] = emb[0].tolist() if len(emb) > 0 else []
-                # If no embedder, chroma will use its default sentence transformer
+                # Don't provide custom embeddings - let Chroma use sentence-transformers
+                # which is optimized for text semantic search (384 dims)
+                # CLIP is reserved for image embeddings (512 dims)
                 embedded.append(result)
             except Exception as e:
-                print(f"⚠️  Error embedding text: {e}")
-                # Still store without custom embedding
+                print(f"⚠️  Error processing text: {e}")
                 embedded.append(item)
                 continue
         return embedded
 
     def _embed_images(self, images: List[Dict], doc_id: str, doc_name: str, filename: str) -> List[Dict]:
-        """Embed images with CLIP (uses text embedding of filename if CLIP unavailable)"""
+        """
+        Process images for storage.
+        Store image descriptions as text, let Chroma embed them with sentence-transformers.
+        """
         embedded = []
         for img in images:
             try:
@@ -339,8 +373,9 @@ class MultimodalIngestionPipeline:
                 img_path = img.get("path", "")
                 page_num = img.get("page", 0)
 
+                # Create rich description for the image that Chroma can embed
                 item = {
-                    "text": f"Image figure diagram on page {page_num}: {img_filename}",
+                    "text": f"Image on page {page_num}: {img_filename}. This is a figure, diagram, chart, or visual content from the document.",
                     "type": "image",
                     "modality": "image",
                     "metadata": {
@@ -355,15 +390,11 @@ class MultimodalIngestionPipeline:
                         "image_url": f"/image/{img_filename}"
                     }
                 }
-
-                if self.embedder and img_path and Path(img_path).exists():
-                    emb = self.embedder.embed_image(img_path)
-                    if len(emb) > 0:
-                        item["embedding"] = emb[0].tolist()
-
+                # Don't provide custom embeddings - let Chroma handle it
+                # This ensures dimensional consistency across all vectors
                 embedded.append(item)
             except Exception as e:
-                print(f"⚠️  Error embedding image {img.get('filename')}: {e}")
+                print(f"⚠️  Error processing image {img.get('filename')}: {e}")
                 continue
         return embedded
 

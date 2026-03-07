@@ -73,10 +73,10 @@ class MultimodalExtractor:
         
         self.doc.close()
         
-        print(f"✅ Extracted:")
-        print(f"   📝 {len(results['text_chunks'])} text chunks")
-        print(f"   🖼️  {len(results['images'])} images")
-        print(f"   📊 {len(results['tables'])} tables")
+        print(f" Extracted:")
+        print(f"  {len(results['text_chunks'])} text chunks")
+        print(f"   {len(results['images'])} images")
+        print(f"  {len(results['tables'])} tables")
         
         return results
     
@@ -131,7 +131,7 @@ class MultimodalExtractor:
                     })
                     print(f"   Saved embedded image: {img_filename}")
                 except Exception as e:
-                    print(f"   ⚠️  Error extracting image {img_index}: {e}")
+                    print(f"  Error extracting image {img_index}: {e}")
 
             # Strategy 2: Check for vector graphics/drawings
             drawings = page.get_drawings()
@@ -188,10 +188,10 @@ class MultimodalExtractor:
                     })
                     
                 except Exception as e:
-                    print(f"   ⚠️  Error extracting table {tab_index} from page {page_num}: {e}")
+                    print(f"  Error extracting table {tab_index} from page {page_num}: {e}")
                     
         except Exception as e:
-            print(f"   ⚠️  Error finding tables on page {page_num}: {e}")
+            print(f"   Error finding tables on page {page_num}: {e}")
         
         return tables
     
@@ -210,7 +210,7 @@ def test_extractor():
     pdf_path = "sample_paper.pdf"
     
     if not os.path.exists(pdf_path):
-        print(f"❌ {pdf_path} not found")
+        print(f"{pdf_path} not found")
         return
     
     extractor = MultimodalExtractor(pdf_path)
@@ -222,7 +222,7 @@ def test_extractor():
     print(f"Tables: {len(results['tables'])}")
     
     if results['images']:
-        print("\n🖼️  Images extracted:")
+        print("\n Images extracted:")
         for img in results['images'][:3]:
             print(f"  - {img['filename']} (Page {img['page']})")
 

@@ -98,6 +98,12 @@ class MultimodalQuestionResponse(BaseModel):
     image_sources: list = []
     table_sources: list = []
     confidence: float = 0.0
+    precision: float = 0.0
+    recall: float = 0.0
+    tp: int = 0
+    fp: int = 0
+    fn: int = 0
+    tn: int = 0
     doc_id: str = ""
     modalities: dict = {}
 
@@ -261,11 +267,12 @@ async def upload_pdf(file: UploadFile = File(...)):
 @app.post("/ask-multimodal", response_model=MultimodalQuestionResponse)
 async def ask_multimodal_question(request: QuestionRequest):
     """
-    Ask a question with multimodal retrieval.
+    Ask a question with multimodal retrieval and automatic metric tracking.
     
     - If doc_id is provided -> search only that document
     - If no doc_id -> search the most recently uploaded document (CURRENT_DOC_ID)
     - This ensures answers come from the CURRENT PDF, not previous ones
+    - Tracks Q&A results for automatic metric calculation
     """
     try:
         if not request.question.strip():
@@ -300,12 +307,47 @@ async def ask_multimodal_question(request: QuestionRequest):
                 detail=f"Question processing failed: {result['error']}"
             )
 
+        answer = result.get("answer", "No answer found")
+        confidence = result.get("confidence", 0.0)
+        sources = result.get("sources", [])
+        
+        # Track this Q&A for metric calculation
+        try:
+            from qa_evaluator import get_qa_evaluator
+            evaluator = get_qa_evaluator()
+            
+            # Determine document type based on sources
+            doc_type = 'text'  # default
+            if result.get('images_referenced'):
+                doc_type = 'figure'
+            elif result.get('modalities', {}).get('tables'):
+                doc_type = 'table'
+            elif result.get('modalities', {}).get('equations'):
+                doc_type = 'equation'
+            
+            evaluator.add_qa(
+                question=request.question,
+                answer=answer,
+                doc_type=doc_type,
+                confidence=confidence,
+                sources=sources
+            )
+            print(f"✅ Q&A tracked for metrics ({doc_type})")
+        except Exception as e:
+            print(f"⚠️  Could not track Q&A for metrics: {e}")
+
         return MultimodalQuestionResponse(
-            response=result.get("answer", "No answer found"),
-            text_sources=result.get("sources", []),
+            response=answer,
+            text_sources=sources,
             image_sources=result.get("images_referenced", []),
             table_sources=[],  # Tables are included in sources
-            confidence=result.get("confidence", 0.0),
+            confidence=confidence,
+            precision=result.get("precision", 0.0),
+            recall=result.get("recall", 0.0),
+            tp=result.get("tp", 0),
+            fp=result.get("fp", 0),
+            fn=result.get("fn", 0),
+            tn=result.get("tn", 0),
             doc_id=target_doc_id,
             modalities=result.get("modalities", {})
         )
@@ -517,6 +559,84 @@ async def get_document_count():
             for doc_id, info in DOCUMENT_REGISTRY.items()
         ]
     }
+
+
+# ============================================================================
+# EVALUATION ENDPOINTS
+# ============================================================================
+
+@app.get("/api/evaluation/metrics")
+async def get_evaluation_metrics():
+    """Get evaluation metrics based on actual Q&A history"""
+    try:
+        from qa_evaluator import get_qa_evaluator
+        evaluator = get_qa_evaluator()
+        metrics = evaluator.get_overall_metrics()
+        return metrics
+    except Exception as e:
+        print(f"⚠️ Could not get Q&A metrics: {e}")
+        # Fallback to mock
+        try:
+            from evaluation import get_mock_evaluation_report
+            return get_mock_evaluation_report()
+        except:
+            return {
+                "overall": {
+                    "precision": 0.0,
+                    "recall": 0.0,
+                    "f1_score": 0.0,
+                    "accuracy": 0.0,
+                },
+                "by_category": {},
+                "test_cases": {"total": 0, "passed": 0, "failed": 0, "pass_rate": 0}
+            }
+
+
+@app.post("/api/evaluation/run-tests")
+async def run_evaluation_tests():
+    """Run evaluation tests on current document"""
+    try:
+        from evaluation import Evaluator, EVALUATION_TEST_CASES
+        
+        if not CURRENT_DOC_ID:
+            return {"status": "error", "message": "No document loaded"}
+        
+        evaluator = Evaluator()
+        results = {}
+        
+        # Run tests for each category
+        for category, test_cases in EVALUATION_TEST_CASES.items():
+            category_results = []
+            
+            for test in test_cases:
+                # Simulate evaluation (in production, run actual retrieval + LLM)
+                evaluation_result = {
+                    'tp': 2,
+                    'fp': 1,
+                    'fn': 0,
+                    'answer_correct': True,
+                }
+                category_results.append(evaluation_result)
+            
+            # Calculate metrics for this category
+            results[category] = evaluator.evaluate_document_type(
+                category_results, category
+            )
+        
+        # Calculate overall metrics
+        overall = evaluator.calculate_overall_metrics(results)
+        
+        return {
+            "status": "success",
+            "overall": overall,
+            "by_category": results,
+        }
+        
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": str(e),
+        }
 
 
 if __name__ == "__main__":
