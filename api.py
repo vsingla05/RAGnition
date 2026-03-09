@@ -330,7 +330,13 @@ async def ask_multimodal_question(request: QuestionRequest):
                 answer=answer,
                 doc_type=doc_type,
                 confidence=confidence,
-                sources=sources
+                sources=sources,
+                tp=result.get("tp", 0),
+                fp=result.get("fp", 0),
+                fn=result.get("fn", 0),
+                tn=result.get("tn", 0),
+                precision=result.get("precision", 0.0),
+                recall=result.get("recall", 0.0)
             )
             print(f"✅ Q&A tracked for metrics ({doc_type})")
         except Exception as e:

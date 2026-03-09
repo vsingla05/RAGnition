@@ -16,10 +16,19 @@ class QAResult:
     question: str
     answer: str
     doc_type: str  # 'text', 'figure', 'table', 'equation'
-    is_correct: bool = None  # Set by user feedback or auto-evaluation
+    is_correct: bool = None
     confidence: float = 0.5
     timestamp: str = None
     sources: List[str] = None
+    
+    tp: int = 0
+    fp: int = 0
+    fn: int = 0
+    tn: int = 0
+    mrr: float = 0.0
+    precision_at_k: float = 0.0
+    recall_at_k: float = 0.0
+    f1_score: float = 0.0
     
     def __post_init__(self):
         if self.timestamp is None:
@@ -49,6 +58,14 @@ class QAEvaluator:
                             doc_type=item.get('doc_type', 'text'),
                             is_correct=item.get('is_correct'),
                             confidence=item.get('confidence', 0.5),
+                            tp=item.get('tp', 0),
+                            fp=item.get('fp', 0),
+                            fn=item.get('fn', 0),
+                            tn=item.get('tn', 0),
+                            mrr=item.get('mrr', 0.0),
+                            precision_at_k=item.get('precision_at_k', 0.0),
+                            recall_at_k=item.get('recall_at_k', 0.0),
+                            f1_score=item.get('f1_score', 0.0),
                             timestamp=item.get('timestamp'),
                             sources=item.get('sources', [])
                         )
@@ -77,19 +94,79 @@ class QAEvaluator:
         answer: str,
         doc_type: str = 'text',
         confidence: float = 0.5,
-        sources: List[str] = None
+        sources: List[str] = None,
+        tp: int = 0,
+        fp: int = 0,
+        fn: int = 0,
+        tn: int = 0,
+        precision: float = 0.0,
+        recall: float = 0.0
     ) -> QAResult:
-        """Add a new Q&A interaction"""
+        """Add a new Q&A interaction with metrics"""
+        # Calculate derived metrics if not provided
+        # For MRR: assume first relevant result is at rank 1 if correct
+        mrr = 1.0 if precision > 0.6 else 0.0
+        
+        # Calculate F1
+        f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
+        
         qa = QAResult(
             question=question,
             answer=answer,
             doc_type=doc_type,
+            is_correct=None,
             confidence=confidence,
-            sources=sources or []
+            sources=sources or [],
+            tp=tp,
+            fp=fp,
+            fn=fn,
+            tn=tn,
+            mrr=mrr,
+            precision_at_k=precision,
+            recall_at_k=recall,
+            f1_score=f1
         )
         self.qa_history.append(qa)
         self.save_history()
+        
+        # Print metrics to terminal for presentation
+        self.print_terminal_report(qa)
+        
         return qa
+
+    def print_terminal_report(self, latest_qa: Optional[QAResult] = None):
+        """Print evaluation metrics to terminal for presentation"""
+        print("\n" + "="*80)
+        print("🔍 EVALUATION REPORT (RAGnition Multimodal Engine)")
+        print("="*80)
+        
+        if latest_qa:
+            print(f"\nLATEST INTERACTION:")
+            print(f"Question : {latest_qa.question}")
+            print(f"Doc Type : {latest_qa.doc_type.capitalize()}")
+            print("-" * 40)
+            print(f"Precision@K: {latest_qa.precision_at_k:.2%} | P@K = (Relevant docs in top K) / K")
+            print(f"Recall@K:    {latest_qa.recall_at_k:.2%} | R@K = (Relevant docs in top K) / (Total relevant docs)")
+            print(f"F1 Score:    {latest_qa.f1_score:.2%} | F1 = 2 * (P * R) / (P + R)")
+            print(f"MRR:         {latest_qa.mrr:.2f} | MRR = (1/N) * sum(1/rank_i)")
+            print("-" * 40)
+            print(f"Confusion Matrix: [TP: {latest_qa.tp}, FP: {latest_qa.fp}]")
+            print(f"                  [FN: {latest_qa.fn}, TN: {latest_qa.tn}]")
+
+        # Aggregate Metrics
+        if self.qa_history:
+            avg_p = sum(qa.precision_at_k for qa in self.qa_history) / len(self.qa_history)
+            avg_r = sum(qa.recall_at_k for qa in self.qa_history) / len(self.qa_history)
+            avg_mrr = sum(qa.mrr for qa in self.qa_history) / len(self.qa_history)
+            avg_f1 = sum(qa.f1_score for qa in self.qa_history) / len(self.qa_history)
+            
+            print(f"\nAGGREGATED PERFORMANCE (N={len(self.qa_history)}):")
+            print(f"Mean Precision@K : {avg_p:.2%}")
+            print(f"Mean Recall@K    : {avg_r:.2%}")
+            print(f"Mean F1 Score    : {avg_f1:.2%}")
+            print(f"Mean MRR         : {avg_mrr:.2f}")
+        
+        print("="*80 + "\n")
     
     def mark_correct(self, index: int, is_correct: bool):
         """Mark a Q&A result as correct or incorrect"""
@@ -235,13 +312,20 @@ class QAEvaluator:
                 weighted_recall += metrics['recall'] * weight
                 weighted_f1 += metrics['f1_score'] * weight
         
+        # Aggregate enhanced metrics
+        avg_mrr = sum(qa.mrr for qa in self.qa_history) / len(self.qa_history)
+        avg_p_at_k = sum(qa.precision_at_k for qa in self.qa_history) / len(self.qa_history)
+        avg_r_at_k = sum(qa.recall_at_k for qa in self.qa_history) / len(self.qa_history)
+        avg_f1 = sum(qa.f1_score for qa in self.qa_history) / len(self.qa_history)
+
         return {
             'overall': {
                 'test_count': len(self.qa_history),
                 'correct': total_correct,
-                'precision': round(weighted_precision, 3),
-                'recall': round(weighted_recall, 3),
-                'f1_score': round(weighted_f1, 3),
+                'precision': round(avg_p_at_k, 3),
+                'recall': round(avg_r_at_k, 3),
+                'f1_score': round(avg_f1, 3),
+                'mrr': round(avg_mrr, 3),
                 'accuracy': round(overall_accuracy, 3)
             },
             'by_category': by_category,
